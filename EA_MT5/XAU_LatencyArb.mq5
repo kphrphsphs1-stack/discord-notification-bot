@@ -59,7 +59,14 @@ int OnInit()
 
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(Slippage);
-   trade.SetTypeFilling(ORDER_FILLING_IOC);
+   // Use broker-supported filling mode
+   ENUM_SYMBOL_TRADE_EXECUTION execMode = (ENUM_SYMBOL_TRADE_EXECUTION)SymbolInfoInteger(Symbol(), SYMBOL_TRADE_EXEMODE);
+   if((SymbolInfoInteger(Symbol(), SYMBOL_FILLING_MODE) & SYMBOL_FILLING_FOK) != 0)
+      trade.SetTypeFilling(ORDER_FILLING_FOK);
+   else if((SymbolInfoInteger(Symbol(), SYMBOL_FILLING_MODE) & SYMBOL_FILLING_IOC) != 0)
+      trade.SetTypeFilling(ORDER_FILLING_IOC);
+   else
+      trade.SetTypeFilling(ORDER_FILLING_RETURN);
    trade.SetAsyncMode(false);
 
    fastHandle = iMA(Symbol(), Period(), FastEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
@@ -101,8 +108,9 @@ void OnTick()
    double currentSpread = SymbolInfoInteger(Symbol(), SYMBOL_SPREAD) * _Point;
    if(currentSpread < MinSpread * _Point || currentSpread > MaxSpread * _Point) return;
 
-   // Update tick buffer every tick
+   // Update tick buffer and chart display every tick
    UpdateTickBuffer(SymbolInfoDouble(Symbol(), SYMBOL_BID));
+   UpdateChartComment();
 
    // Manage trailing stop on every tick
    if(UseTrailingStop) ManageTrailingStop();
@@ -166,16 +174,16 @@ int DetectArbitrageSignal()
    bool upTrend   = fastBuf[0] > slowBuf[0];
    bool downTrend = fastBuf[0] < slowBuf[0];
 
-   // BUY: Price dipped below slow average (underpriced) + bullish EMA
-   if(deviation < -DevThreshold && (crossUp || upTrend))
+   // BUY: Price dipped below slow average (underpriced) + EMA crossover confirmation
+   if(deviation < -DevThreshold && crossUp)
    {
       Print("BUY Signal | Dev: ", DoubleToString(deviation, 4),
             "% | FastEMA: ", fastBuf[0], " | SlowEMA: ", slowBuf[0]);
       return 1;
    }
 
-   // SELL: Price spiked above slow average (overpriced) + bearish EMA
-   if(deviation > DevThreshold && (crossDown || downTrend))
+   // SELL: Price spiked above slow average (overpriced) + EMA crossover confirmation
+   if(deviation > DevThreshold && crossDown)
    {
       Print("SELL Signal | Dev: ", DoubleToString(deviation, 4),
             "% | FastEMA: ", fastBuf[0], " | SlowEMA: ", slowBuf[0]);
@@ -316,7 +324,9 @@ bool IsTradeSession()
 //+------------------------------------------------------------------+
 //| Display info on chart                                              |
 //+------------------------------------------------------------------+
-void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam) {}
+
+void UpdateChartComment()
 {
    Comment("XAU Latency Arb EA\n",
            "Balance: $", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2), "\n",
