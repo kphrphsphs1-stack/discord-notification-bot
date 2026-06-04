@@ -17,7 +17,7 @@ input int    SlowEMA_Period  = 20;    // Slow EMA Period
 input double DevThreshold    = 0.08;  // Price Deviation Threshold (%)
 input int    TickWindow      = 20;    // Tick buffer window size
 input double MinSpread       = 2.0;   // Min spread to trade (points)
-input double MaxSpread       = 30.0;  // Max spread to trade (points)
+input double MaxSpread       = 80.0;  // Max spread to trade (points)
 
 //--- Risk Management
 input group "=== RISK MANAGEMENT ==="
@@ -48,8 +48,10 @@ CPositionInfo posInfo;
 int          fastHandle, slowHandle;
 double       fastBuf[], slowBuf[];
 double       tickBuffer[];
-int          tickCount    = 0;
-datetime     lastBarTime  = 0;
+int          tickCount      = 0;
+datetime     lastBarTime    = 0;
+datetime     lastTradeTime  = 0;   // cooldown tracker
+int          barsCooldown   = 3;   // bars between trades
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -115,19 +117,29 @@ void OnTick()
    // Manage trailing stop on every tick
    if(UseTrailingStop) ManageTrailingStop();
 
-   // New bar check - only recalculate on new M15 bar
+   // Refresh EMA on each new bar
    datetime currentBar = iTime(Symbol(), Period(), 0);
-   if(currentBar == lastBarTime) return;
-   lastBarTime = currentBar;
+   if(currentBar != lastBarTime)
+   {
+      lastBarTime = currentBar;
+      CopyBuffer(fastHandle, 0, 0, 3, fastBuf);
+      CopyBuffer(slowHandle, 0, 0, 3, slowBuf);
+   }
+
+   // Skip if EMA not ready
+   if(ArraySize(fastBuf) < 3 || ArraySize(slowBuf) < 3) return;
 
    // Skip if max trades reached
    if(CountOpenTrades() >= MaxTrades) return;
 
-   // Refresh indicator buffers
-   if(CopyBuffer(fastHandle, 0, 0, 3, fastBuf) < 3) return;
-   if(CopyBuffer(slowHandle, 0, 0, 3, slowBuf) < 3) return;
+   // Cooldown: no trade within barsCooldown bars of last trade
+   if(lastTradeTime > 0)
+   {
+      int barsSinceTrade = Bars(Symbol(), Period(), lastTradeTime, TimeCurrent()) - 1;
+      if(barsSinceTrade < barsCooldown) return;
+   }
 
-   // Detect signal
+   // Detect signal on every tick
    int signal = DetectArbitrageSignal();
    if(signal == 0) return;
 
@@ -168,22 +180,20 @@ int DetectArbitrageSignal()
    // Price deviation of fast vs slow feed
    double deviation = (fastPrice - slowAvg) / slowAvg * 100.0;
 
-   // EMA trend confirmation
-   bool crossUp   = fastBuf[1] <= slowBuf[1] && fastBuf[0] > slowBuf[0];
-   bool crossDown = fastBuf[1] >= slowBuf[1] && fastBuf[0] < slowBuf[0];
+   // EMA trend direction (from last completed bar)
    bool upTrend   = fastBuf[0] > slowBuf[0];
    bool downTrend = fastBuf[0] < slowBuf[0];
 
-   // BUY: Price dipped below slow average (underpriced) + EMA crossover confirmation
-   if(deviation < -DevThreshold && crossUp)
+   // BUY: tick price dipped below rolling avg (underpriced) + uptrend confirmed
+   if(deviation < -DevThreshold && upTrend)
    {
       Print("BUY Signal | Dev: ", DoubleToString(deviation, 4),
             "% | FastEMA: ", fastBuf[0], " | SlowEMA: ", slowBuf[0]);
       return 1;
    }
 
-   // SELL: Price spiked above slow average (overpriced) + EMA crossover confirmation
-   if(deviation > DevThreshold && crossDown)
+   // SELL: tick price spiked above rolling avg (overpriced) + downtrend confirmed
+   if(deviation > DevThreshold && downTrend)
    {
       Print("SELL Signal | Dev: ", DoubleToString(deviation, 4),
             "% | FastEMA: ", fastBuf[0], " | SlowEMA: ", slowBuf[0]);
@@ -249,12 +259,15 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
    bool   result  = trade.PositionOpen(Symbol(), orderType, lots, price, sl, tp, comment);
 
    if(result)
+   {
+      lastTradeTime = TimeCurrent();
       Print("Trade opened | ", EnumToString(orderType),
             " | Lots: ", DoubleToString(lots, 2),
             " | Entry: ", DoubleToString(price, _Digits),
             " | SL: ", DoubleToString(sl, _Digits),
             " | TP: ", DoubleToString(tp, _Digits),
             " | Risk: $", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE) * RiskPercent / 100.0, 2));
+   }
    else
       Print("Trade FAILED | Error: ", GetLastError(), " | ", trade.ResultRetcodeDescription());
 }
